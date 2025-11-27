@@ -1,6 +1,5 @@
 import sqlite3
 import json
-import re
 import os
 import time
 import random
@@ -12,7 +11,6 @@ from datetime import datetime
 BASE_ODDS_DIR = "data/odds"
 DB_PATH = 'football.db'
 
-# Заголовки, чтобы притворяться браузером Chrome
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 YaBrowser/25.10.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
@@ -20,13 +18,10 @@ HEADERS = {
 }
 
 
-def extract_team_id(logo_url):
-    if not logo_url: return None
-    match = re.search(r'/teams/(\d+)/', logo_url)
-    return int(match.group(1)) if match else None
-
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 def extract_match_id_from_slug(slug):
+    """Вытаскивает ID матча из начала ссылки (1527888-...)."""
     if not slug: return None
     try:
         parts = slug.split('-')
@@ -38,21 +33,20 @@ def extract_match_id_from_slug(slug):
 
 
 def generate_file_paths(timestamp_ms, match_id):
-    """Генерирует пути. Возвращает абсолютные пути для сохранения и относительные для БД"""
+    """Генерирует пути для сохранения файлов."""
     dt = datetime.fromtimestamp(timestamp_ms / 1000)
 
-    # Папка: data/odds/2025/11/20/
     relative_dir = os.path.join(str(dt.year), f"{dt.month:02d}", f"{dt.day:02d}")
-    full_dir = os.path.join(BASE_ODDS_DIR, relative_dir)  # Полный путь для os.makedirs
+    full_dir = os.path.join(BASE_ODDS_DIR, relative_dir)
 
     prematch_name = f"{match_id}_prematch.json.gz"
     live_name = f"{match_id}_live.json.gz"
 
-    # Пути для сохранения файла (полные)
+    # Полные пути (для Python)
     prematch_save_path = os.path.join(full_dir, prematch_name)
     live_save_path = os.path.join(full_dir, live_name)
 
-    # Пути для записи в БД (относительные, чтобы переносить базу)
+    # Относительные пути (для БД)
     prematch_db_path = os.path.join(relative_dir, prematch_name)
     live_db_path = os.path.join(relative_dir, live_name)
 
@@ -60,24 +54,15 @@ def generate_file_paths(timestamp_ms, match_id):
 
 
 def download_and_archive(slug, save_path, is_live):
-    """
-    Скачивает JSON, сжимает в GZIP и сохраняет.
-    Возвращает True, если успешно скачано или уже существует.
-    """
-    # 1. Если файл уже есть - не качаем (экономим время и риски бана)
+    """Скачивает историю кэфов, если её еще нет."""
     if os.path.exists(save_path):
-        # print(f"Файл уже существует: {save_path}")
         return True
 
-    # 2. Создаем папку, если её нет
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-    # 3. Формируем URL
     mode_str = "true" if is_live else "false"
     url = f"https://app.nb-bet.com/v1/soccer/events/odds-history/{slug}/{mode_str}"
 
     try:
-        # Случайная задержка перед запросом!
         sleep_time = random.uniform(1.5, 3.5)
         time.sleep(sleep_time)
 
@@ -85,17 +70,13 @@ def download_and_archive(slug, save_path, is_live):
 
         if response.status_code == 200:
             try:
-                # Пробуем распарсить JSON, чтобы убедиться, что пришли данные, а не ошибка HTML
                 data = response.json()
-
-                # Сохраняем сразу в GZIP
                 with gzip.open(save_path, 'wt', encoding='utf-8') as f:
                     json.dump(data, f)
-
                 print(f"[{'LIVE' if is_live else 'PRE'}] Скачано: {slug[:20]}...")
                 return True
             except json.JSONDecodeError:
-                print(f"Ошибка JSON для {slug} ({mode_str})")
+                print(f"Ошибка JSON для {slug}")
                 return False
         else:
             print(f"Ошибка HTTP {response.status_code} для {slug}")
@@ -105,6 +86,42 @@ def download_and_archive(slug, save_path, is_live):
         print(f"Ошибка соединения для {slug}: {e}")
         return False
 
+
+def get_or_create_team_id(cursor, cache, name, logo_url):
+    """
+    Возвращает ID команды.
+    1. Ищет в кэше (памяти).
+    2. Если нет - пробует создать в БД.
+    3. Если имя занято - достает ID из БД.
+    """
+    if not name:
+        return None
+
+    name = name.strip()
+
+    # 1. Проверка в кэше (самое быстрое)
+    if name in cache:
+        return cache[name]
+
+    # 2. Попытка вставки
+    try:
+        cursor.execute("INSERT INTO teams (name, logo_url) VALUES (?, ?)", (name, logo_url))
+        new_id = cursor.lastrowid
+        cache[name] = new_id  # Обновляем кэш
+        return new_id
+    except sqlite3.IntegrityError:
+        # 3. Если команда уже есть (сработал UNIQUE constraint), получаем её ID
+        cursor.execute("SELECT id FROM teams WHERE name = ?", (name,))
+        result = cursor.fetchone()
+        if result:
+            existing_id = result[0]
+            cache[name] = existing_id  # Обновляем кэш
+            return existing_id
+
+    return None
+
+
+# --- ГЛАВНАЯ ФУНКЦИЯ ---
 
 def parse_and_process_daily_data(json_file_path):
     with open(json_file_path, 'r', encoding='utf-8') as f:
@@ -116,12 +133,19 @@ def parse_and_process_daily_data(json_file_path):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
+    # --- ПРЕДЗАГРУЗКА КЭША КОМАНД ---
+    # Чтобы не дергать базу на каждой итерации, загрузим словарь {Name: ID}
+    # Это значительно ускорит работу
+    cursor.execute("SELECT name, id FROM teams")
+    teams_cache = {row[0]: row[1] for row in cursor.fetchall()}
+
     try:
         for league_obj in data['data']['leagues']:
             matches_list = league_obj.get('4', [])
             if not matches_list: continue
 
             # --- Лига ---
+            # Надежнее брать ID лиги из первого матча
             first_match = matches_list[0]
             league_id = first_match.get('25')
             if not league_id: continue
@@ -137,29 +161,22 @@ def parse_and_process_daily_data(json_file_path):
                 match_id = extract_match_id_from_slug(slug)
                 if not match_id: continue
 
-                # Команды
+                # === РАБОТА С КОМАНДАМИ (НОВАЯ ЛОГИКА) ===
+                home_name = match.get('7')
                 home_logo = match.get('8')
-                home_id = extract_team_id(home_logo)
-                away_logo = match.get('16')
-                away_id = extract_team_id(away_logo)
 
-                if home_id:
-                    cursor.execute("INSERT OR IGNORE INTO teams (id, name, logo_url) VALUES (?, ?, ?)",
-                                   (home_id, match.get('7'), home_logo))
-                if away_id:
-                    cursor.execute("INSERT OR IGNORE INTO teams (id, name, logo_url) VALUES (?, ?, ?)",
-                                   (away_id, match.get('15'), away_logo))
+                away_name = match.get('15')
+                away_logo = match.get('16')
+
+                # Получаем ID (или создаем, если новые)
+                home_id = get_or_create_team_id(cursor, teams_cache, home_name, home_logo)
+                away_id = get_or_create_team_id(cursor, teams_cache, away_name, away_logo)
 
                 # --- ГЕНЕРАЦИЯ ПУТЕЙ И СКАЧИВАНИЕ ---
                 start_time = match.get('4')
-
-                # Получаем кортежи путей: (для сохранения на диск), (для записи в БД)
                 (save_pre, save_live), (db_pre, db_live) = generate_file_paths(start_time, match_id)
 
-                # !!! СКАЧИВАНИЕ ДАННЫХ !!!
-                # Скачиваем прематч (false)
                 download_and_archive(slug, save_pre, is_live=False)
-                # Скачиваем лайв (true)
                 download_and_archive(slug, save_live, is_live=True)
 
                 # --- Запись в БД ---
@@ -180,7 +197,7 @@ def parse_and_process_daily_data(json_file_path):
                 ''', (
                     match_id, slug, league_id, start_time,
                     home_id, away_id,
-                    match.get('7'), match.get('15'),
+                    home_name, away_name,
                     match.get('10'), match.get('18'), match.get('11'), match.get('19'),
                     opening.get('1') if opening else None,
                     opening.get('2') if opening else None,
@@ -197,7 +214,8 @@ def parse_and_process_daily_data(json_file_path):
 
     except Exception as e:
         print(f"Критическая ошибка: {e}")
+        import traceback
+        traceback.print_exc()
         conn.rollback()
     finally:
         conn.close()
-

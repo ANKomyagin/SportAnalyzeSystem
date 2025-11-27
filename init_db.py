@@ -20,9 +20,9 @@ CREATE TABLE IF NOT EXISTS leagues (
 # --- Таблица команд
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS teams (
-    id INTEGER PRIMARY KEY,        -- ID из URL логотипа (например, 75)
-    name TEXT NOT NULL,            -- Ключ '7' или '15'
-    logo_url TEXT                  -- Ссылка на лого, чтоб ваах как красиво в дипломе было
+    id INTEGER PRIMARY KEY AUTOINCREMENT,  -- SQLite сам будет считать 1, 2, 3...
+    name TEXT UNIQUE NOT NULL,             -- Имя должно быть уникальным
+    logo_url TEXT
 )
 ''')
 

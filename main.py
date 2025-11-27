@@ -27,13 +27,10 @@ if start_point < end_point:
 end_point -= step  # чтобы было включительно
 while start_point != end_point:
     # --- добавление матчей
-    print(1)
     response = requests.get(f"https://app.nb-bet.com/v1/soccer/results/page?timestamp={start_point}")
     file = open("tmp.txt", mode="w", encoding="utf-8")
     file.write(str(response.text))
     file.close()
-    print(2)
 
     parse_and_process_daily_data('tmp.txt')
-    print(3)
     start_point -= step
