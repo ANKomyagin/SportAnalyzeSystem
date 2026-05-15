@@ -5,6 +5,7 @@ import time
 import random
 import gzip
 import requests
+import logging
 from datetime import datetime
 
 # --- КОНФИГУРАЦИЯ ---
@@ -63,7 +64,7 @@ def download_and_archive(slug, save_path, is_live):
     url = f"https://app.nb-bet.com/v1/soccer/events/odds-history/{slug}/{mode_str}"
 
     try:
-        sleep_time = random.uniform(1.5, 3.5)
+        sleep_time = random.uniform(1, 1.5)
         time.sleep(sleep_time)
 
         response = requests.get(url, headers=HEADERS, timeout=10)
@@ -73,17 +74,17 @@ def download_and_archive(slug, save_path, is_live):
                 data = response.json()
                 with gzip.open(save_path, 'wt', encoding='utf-8') as f:
                     json.dump(data, f)
-                print(f"[{'LIVE' if is_live else 'PRE'}] Скачано: {slug[:20]}...")
+                logging.info(f"[{'LIVE' if is_live else 'PRE'}] Скачано: {slug[:20]}...")
                 return True
             except json.JSONDecodeError:
-                print(f"Ошибка JSON для {slug}")
+                logging.error(f"Ошибка JSON для {slug}")
                 return False
         else:
-            print(f"Ошибка HTTP {response.status_code} для {slug}")
+            logging.error(f"Ошибка HTTP {response.status_code} для {slug}")
             return False
 
     except Exception as e:
-        print(f"Ошибка соединения для {slug}: {e}")
+        logging.error(f"Ошибка соединения для {slug}: {e}")
         return False
 
 
@@ -210,12 +211,12 @@ def parse_and_process_daily_data(json_file_path):
                 ))
 
         conn.commit()
-        print(f"Обработка завершена: {json_file_path}")
+        logging.info(f"Обработка завершена: {json_file_path}")
 
     except Exception as e:
-        print(f"Критическая ошибка: {e}")
+        logging.error(f"Критическая ошибка: {e}")
         import traceback
-        traceback.print_exc()
+        logging.error(traceback.format_exc())
         conn.rollback()
     finally:
         conn.close()
