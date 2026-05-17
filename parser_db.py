@@ -201,11 +201,11 @@ def parse_and_process_daily_data(json_file_path):
                     home_name, away_name,
                     match.get('10'), match.get('18'), match.get('11'), match.get('19'),
                     opening.get('1') if opening else None,
-                    opening.get('2') if opening else None,
                     opening.get('3') if opening else None,
+                    opening.get('2') if opening else None,
                     closing.get('1') if closing else None,
-                    closing.get('2') if closing else None,
                     closing.get('3') if closing else None,
+                    closing.get('2') if closing else None,
                     db_pre,
                     db_live
                 ))
